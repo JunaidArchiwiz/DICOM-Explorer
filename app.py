@@ -1,15 +1,127 @@
-
 import os
 import pandas as pd
 import streamlit as st
 import SimpleITK as sitk
-import webbrowser
 import plotly.graph_objects as go
 import numpy as np
 from datetime import datetime
-
 # Configure page for better clinical experience
 st.set_page_config(layout="wide", initial_sidebar_state="expanded")
+
+def is_mobile():
+    """Check if current view is mobile"""
+    return st.query_params.get('mobile', False) or st.session_state.get('is_mobile', False)
+
+def create_control_container(is_bottom=False):
+    """Create controls either in sidebar or bottom container"""
+    if is_bottom:
+        return st.container()
+    return st.sidebar
+
+def render_controls(container, dirname, reader, original_img, metadata_to_display):
+    """Render all controls in the specified container"""
+    with container:
+        if is_mobile():
+            cols = st.columns([1, 1])
+            with cols[0]:
+                st.subheader("Navigation")
+        else:
+            st.subheader("Navigation")
+            
+        # Slice navigation
+        n_slices = original_img.shape[0]
+        slice_ix = container.slider('Slice', 1, n_slices, int(n_slices/2)) - 1
+        
+        if is_mobile():
+            with cols[1]:
+                st.subheader("Settings")
+        else:
+            st.subheader("Contrast Settings")
+            
+        # CT contrast-specific presets
+        preset_options = {
+            "Standard": (40, 400),
+            "Soft Tissue": (50, 450),
+            "Contrast Enhanced": (100, 700),
+            "Perfusion": (150, 800),
+            "Custom": "custom"
+        }
+        
+        if is_mobile():
+            cols2 = st.columns([1, 1])
+            with cols2[0]:
+                selected_preset = st.selectbox(
+                    "Window Preset",
+                    options=list(preset_options.keys()),
+                    index=0
+                )
+        else:
+            selected_preset = container.selectbox(
+                "Window Preset",
+                options=list(preset_options.keys()),
+                index=0
+            )
+        
+        # Window/level handling
+        if selected_preset == "Custom":
+            default_center, default_width = get_default_window_level(metadata_to_display)
+            
+            if is_mobile():
+                with cols2[1]:
+                    window_center = st.slider(
+                        "Center",
+                        min_value=-1024,
+                        max_value=3000,
+                        value=int(default_center)
+                    )
+                    window_width = st.slider(
+                        "Width",
+                        min_value=1,
+                        max_value=4000,
+                        value=int(default_width)
+                    )
+            else:
+                window_center = container.slider(
+                    "Window Center",
+                    min_value=-1024,
+                    max_value=3000,
+                    value=int(default_center)
+                )
+                window_width = container.slider(
+                    "Window Width",
+                    min_value=1,
+                    max_value=4000,
+                    value=int(default_width)
+                )
+            
+            use_original = (window_center == default_center and window_width == default_width)
+            img_to_display = original_img
+        else:
+            use_original = False
+            window_center, window_width = preset_options[selected_preset]
+            img_to_display = st.session_state.deidentified_data if st.session_state.get('is_deidentified', False) else original_img
+        
+        if is_mobile():
+            cols3 = st.columns([1, 1])
+            with cols3[0]:
+                output = st.radio('Display', ['Image', 'Metadata'], index=0, horizontal=True)
+            with cols3[1]:
+                if not st.session_state.get('is_deidentified', False):
+                    if st.button('De-identify', use_container_width=True):
+                        st.session_state.deidentified_data, st.session_state.deidentified_metadata = deidentify_dicom_series(reader)
+                        st.session_state.is_deidentified = True
+                        st.session_state.show_deident_message = True
+                        st.rerun()
+        else:
+            output = container.radio('Display', ['Image', 'Metadata'], index=0)
+            if not st.session_state.get('is_deidentified', False):
+                if container.button('De-identify DICOM', use_container_width=True):
+                    st.session_state.deidentified_data, st.session_state.deidentified_metadata = deidentify_dicom_series(reader)
+                    st.session_state.is_deidentified = True
+                    st.session_state.show_deident_message = True
+                    st.rerun()
+        
+        return slice_ix, window_center, window_width, use_original, output, img_to_display
 
 def dir_selector(folder_path='.'):
     """Directory selector with session state persistence"""
@@ -124,28 +236,28 @@ def deidentify_dicom_series(reader):
     
     return image_series, safe_metadata
 
+
+
 def plot_slice(vol, slice_ix, metadata, window_center, window_width, use_original=False):
-    """Create an interactive plot of a DICOM slice with proper aspect ratio"""
+    """Create an interactive plot of a DICOM slice with proper aspect ratio and mobile responsiveness"""
     selected_slice = vol[slice_ix, :, :]
-    
-    # Only apply window/level if not using original values
+
     if not use_original:
         selected_slice = apply_window_level(selected_slice, window_center, window_width)
-    
-    # Get patient name based on de-identification status
+
     if st.session_state.is_deidentified:
         patient_name = "REMOVED"
     else:
         patient_name = metadata.get("0010|0010", "Anonymous")
-    
+
     datetime_str = format_datetime(metadata)
     total_slices = vol.shape[0]
     aspect_ratio = calculate_aspect_ratio(metadata)
-    
+
     study_desc = metadata.get("0008|1030", "").strip()
     if st.session_state.is_deidentified:
         study_desc = "REMOVED"
-    
+
     fig = go.Figure()
     fig.add_trace(
         go.Heatmap(
@@ -156,48 +268,68 @@ def plot_slice(vol, slice_ix, metadata, window_center, window_width, use_origina
             hoverinfo='z'
         )
     )
-    
-    font_size = 12 if st.session_state.get('is_mobile', False) else 14
-    
+
+    # Adjust font size and positioning for mobile
+    is_mobile = st.session_state.get('is_mobile', False)
+    font_size = 10 if is_mobile else 14
+
+    # Adjust y-positions for mobile view
+    if is_mobile:
+        patient_y = 1.12
+        date_y = 1.04
+        slice_y = -0.06
+        x_padding = 0.02
+    else:
+        patient_y = 1.17
+        date_y = 1.08
+        slice_y = -0.03
+        x_padding = 0
+
     # Update display text based on whether using original values
     window_level_text = "Original Values" if use_original else f"W: {window_width} L: {window_center}"
-    
+
     annotations = [
         dict(
-            x=0, y=1.17,
+            x=x_padding, y=patient_y,
             xref="paper", yref="paper",
             text=f"Patient: {patient_name}",
             showarrow=False,
             font=dict(size=font_size, color="white"),
             bgcolor="black",
-            borderpad=4
+            borderpad=2 if is_mobile else 4,
+            xanchor='left'
         ),
         dict(
-            x=0, y=1.08,
+            x=x_padding, y=date_y,
             xref="paper", yref="paper",
             text=f"Date: {datetime_str}",
             showarrow=False,
             font=dict(size=font_size, color="white"),
             bgcolor="black",
-            borderpad=4
+            borderpad=2 if is_mobile else 4,
+            xanchor='left'
         ),
-       
         dict(
-            x=1, y=-0.03,
+            x=1 - x_padding, y=slice_y,
             xref="paper", yref="paper",
             text=f"Slice: {slice_ix + 1}/{total_slices} | {window_level_text}",
             showarrow=False,
             font=dict(size=font_size, color="white"),
             bgcolor="black",
-            borderpad=4,
+            borderpad=2 if is_mobile else 4,
             xanchor='right'
         )
     ]
-    
+
     fig.update_layout(
         annotations=annotations,
         autosize=True,
-        margin=dict(l=20, r=20, t=60, b=20),
+        margin=dict(
+            l=10 if is_mobile else 20,
+            r=10 if is_mobile else 20,
+            t=40 if is_mobile else 60,
+            b=20
+        ),
         paper_bgcolor='black',
         plot_bgcolor='black',
         xaxis=dict(
@@ -221,9 +353,11 @@ def plot_slice(vol, slice_ix, metadata, window_center, window_width, use_origina
             opacity=0.8,
         ),
     )
-    
+
     return fig
 
+
+    
 
 
 def main():
@@ -233,10 +367,15 @@ def main():
         if key not in st.session_state:
             st.session_state[key] = None
     
-    st.session_state.is_mobile = st.query_params.get('mobile', False)
+    # Set mobile state
+    st.session_state.is_mobile = is_mobile()
     
-    # Sidebar setup
-    st.sidebar.title('CT Contrast Viewer')
+    # Create title based on device type
+    if is_mobile():
+        st.title('DICOM Viewer')
+    else:
+        st.sidebar.title('DICOM Viewer')
+    
     dirname = dir_selector()
     
     if dirname is not None:
@@ -250,79 +389,22 @@ def main():
             original_data = reader.Execute()
             original_img = sitk.GetArrayViewFromImage(original_data)
             
-            # Handle deidentification
-            if st.session_state.is_deidentified and st.session_state.deidentified_data is not None:
-                deident_img = sitk.GetArrayViewFromImage(st.session_state.deidentified_data)
+            # Get metadata for display
+            metadata_to_display = {k: reader.GetMetaData(0, k) for k in reader.GetMetaDataKeys(0)}
+            if st.session_state.get('is_deidentified', False):
                 metadata_to_display = st.session_state.deidentified_metadata[0]
-            else:
-                deident_img = None
-                metadata_to_display = {k: reader.GetMetaData(0, k) for k in reader.GetMetaDataKeys(0)}
             
-            # Layout controls
-            st.sidebar.subheader("Navigation")
-            n_slices = original_img.shape[0]
-            slice_ix = st.sidebar.slider('Slice', 1, n_slices, int(n_slices/2)) - 1
+            # Create controls container based on device type
+            control_container = create_control_container(is_mobile())
             
-            # Clinical controls
-            st.sidebar.subheader("Contrast Settings")
-            
-            # CT contrast-specific presets
-            preset_options = {
-                "Standard": (40, 400),
-                "Soft Tissue": (50, 450),
-                "Contrast Enhanced": (100, 700),
-                "Perfusion": (150, 800),
-                "Custom": "custom"
-            }
-            
-            selected_preset = st.sidebar.selectbox(
-                "Window Preset",
-                options=list(preset_options.keys()),
-                index=0
+            # Render controls and get values
+            slice_ix, window_center, window_width, use_original, output, img_to_display = render_controls(
+                control_container, dirname, reader, original_img, metadata_to_display
             )
-         
-            # Window/level handling
-            if selected_preset == "Custom":
-                # Get original window/level values from DICOM metadata
-                default_center, default_width = get_default_window_level(metadata_to_display)
-                
-                window_center = st.sidebar.slider(
-                    "Window Center",
-                    min_value=-1024,
-                    max_value=3000,
-                    value=int(default_center)  # Use DICOM default
-                )
-                window_width = st.sidebar.slider(
-                    "Window Width",
-                    min_value=1,
-                    max_value=4000,
-                    value=int(default_width)   # Use DICOM default
-                )
-                
-                # Check if sliders have been moved from their default positions
-                use_original = (window_center == default_center and 
-                              window_width == default_width)
-                              
-                img_to_display = original_img
-            else:
-                use_original = False
-                window_center, window_width = preset_options[selected_preset]
-                img_to_display = deident_img if st.session_state.is_deidentified else original_img
-            
-            output = st.sidebar.radio('Display', ['Image', 'Metadata'], index=0)
-            
-            # De-identification control
-            if not st.session_state.is_deidentified:
-                if st.sidebar.button('De-identify DICOM', use_container_width=True):
-                    st.session_state.deidentified_data, st.session_state.deidentified_metadata = deidentify_dicom_series(reader)
-                    st.session_state.is_deidentified = True
-                    st.session_state.show_deident_message = True
-                    st.rerun()
             
             # Display output
             if output == 'Image':
-                # Update metadata for current slice
-                if st.session_state.is_deidentified and not use_original:
+                if st.session_state.get('is_deidentified', False) and not use_original:
                     metadata_to_display = st.session_state.deidentified_metadata[slice_ix]
                 else:
                     metadata_to_display = {k: reader.GetMetaData(slice_ix, k) for k in reader.GetMetaDataKeys(slice_ix)}
@@ -353,18 +435,16 @@ def main():
                     }
                 )
                 
-                # Show de-identification message only once after de-identification
-                if st.session_state.show_deident_message:
+                if st.session_state.get('show_deident_message', False):
                     st.success('Series is de-identified. Sensitive metadata has been removed.')
                     st.session_state.show_deident_message = False
             else:
-                if st.session_state.is_deidentified and not use_original:
+                if st.session_state.get('is_deidentified', False) and not use_original:
                     metadata_to_display = st.session_state.deidentified_metadata[slice_ix]
                 df = pd.DataFrame.from_dict(metadata_to_display, orient='index', columns=['Value'])
                 st.dataframe(df, use_container_width=True)
                 
-                # Show de-identification message only once in metadata view as well
-                if st.session_state.show_deident_message:
+                if st.session_state.get('show_deident_message', False):
                     st.success('Series is de-identified. Sensitive metadata has been removed.')
                     st.session_state.show_deident_message = False
                     
