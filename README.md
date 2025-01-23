@@ -1,6 +1,7 @@
-\# DICOM Viewer and De-Identification Tool
+# DICOM Viewer and De-Identification Tool
 
 ## Overview
+
 This project is a **Streamlit-based application** designed for visualizing and de-identifying **DICOM** (Digital Imaging and Communications in Medicine) files. It allows users to navigate through DICOM series, view individual slices interactively, and ensure patient privacy by removing sensitive metadata.
 
 ## Features
